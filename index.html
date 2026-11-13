@@ -355,6 +355,7 @@ function settingsBlock(){
 let preState=null;
 function openPre(ex){
   try{
+  if(ex.kind!=="breath")loadPiano();
   preState={ex,tr:(ex.kind==="melody"||ex.kind==="breath")?0:autoShift(ex),tempo:1};
   const sh=el("div",{class:"sheet",role:"dialog","aria-label":ex.name});
   const body=el("div",{class:"view"});const w=el("div",{class:"wrap"});body.append(w);
@@ -424,7 +425,27 @@ function makeBus(){ // guide bus with a compressor so tones are loud on a phone 
   const comp=AC.createDynamicsCompressor();comp.threshold.value=-20;comp.ratio.value=4;comp.attack.value=.003;comp.release.value=.2;
   const out=AC.createGain();out.gain.value=1.6;BUS=AC.createGain();BUS.connect(comp);comp.connect(out);out.connect(AC.destination);return BUS;
 }
+/* Grand piano guide: Salamander Grand Piano samples (Alexander Holm, CC BY 3.0) */
+const PIANO={bufs:{},loading:null,ready:false};
+const PNOTES=[];for(let o=1;o<=5;o++)[["C",0],["Ds",3],["Fs",6],["A",9]].forEach(([n,pc])=>PNOTES.push({file:n+o,m:12*(o+1)+pc}));PNOTES.push({file:"C6",m:84});
+function loadPiano(){
+  if(PIANO.loading)return PIANO.loading;
+  const ctx=AC||newCtx();
+  PIANO.loading=Promise.all(PNOTES.map(async p=>{try{const r=await fetch("piano/"+p.file+".mp3");const ab=await r.arrayBuffer();
+      PIANO.bufs[p.m]=await new Promise((res,rej)=>ctx.decodeAudioData(ab,res,rej));}catch(e){}}))
+    .then(()=>{PIANO.ready=Object.keys(PIANO.bufs).length>0;});
+  return PIANO.loading;
+}
+function pianoNote(m,t,dur,vol){
+  const keys=Object.keys(PIANO.bufs).map(Number);let best=keys[0];for(const k of keys)if(Math.abs(k-m)<Math.abs(best-m))best=k;
+  const src=AC.createBufferSource();src.buffer=PIANO.bufs[best];src.playbackRate.value=Math.pow(2,(m-best)/12);
+  const g=AC.createGain();const lvl=vol*1.1;const end=t+dur;
+  g.gain.setValueAtTime(lvl,t);g.gain.setValueAtTime(lvl,Math.max(t+.05,end-.02));g.gain.exponentialRampToValueAtTime(.0005,end+.35);
+  src.connect(g);g.connect(BUS||AC.destination);src.start(t);src.stop(end+.4);
+}
 function tone(m,t,dur,vol){
+  if(vol<=0)return;
+  if(PIANO.ready){pianoNote(m,t,dur,vol);return;}
   if(vol<=0)return;const f0=m2hz(m,S.a4);
   const o1=AC.createOscillator(),o2=AC.createOscillator(),o3=AC.createOscillator(),g=AC.createGain(),f=AC.createBiquadFilter();
   o1.type="sawtooth";o1.frequency.value=f0;o2.type="sine";o2.frequency.value=f0*2;o3.type="sine";o3.frequency.value=f0*4;
@@ -441,6 +462,7 @@ async function previewPlay(ex){
   if(!stream)setSession("playback");
   try{await wake();}catch(e){return;}
   makeBus();
+  await Promise.race([loadPiano(),wait(4000)]);
   const tl=buildTimeline(ex,preState.tr,preState.tempo);const t0=AC.currentTime+.1;
   tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,Math.max(.4,S.guide)));
 }
@@ -473,6 +495,7 @@ async function startExercise(ex){
   stage.append(cv,el("div",{class:"hud"},close,meter,stopB),count,prog);document.body.append(stage);
   if(!breath){const z=meter.querySelector(".zone");const p=S.tol/50*50;z.style.left=(50-p)+"%";z.style.width=(2*p)+"%";}
   try{await ensureAudio();}catch(e){stage.remove();showMicError(e);return;}
+  if(!breath)await Promise.race([loadPiano(),wait(4000)]);
   let rec=null;const chunks=[];
   if(S.record&&window.MediaRecorder){try{rec=new MediaRecorder(stream);rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};rec.start();}catch(e){rec=null;}}
   const tl=buildTimeline(ex,preState?preState.tr:0,preState?preState.tempo:1);
