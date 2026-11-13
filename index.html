@@ -178,7 +178,7 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 
 <script>
 "use strict";
-const APP_VERSION="1.7 · track picker + backing";
+const APP_VERSION="1.7.1 · backing sync fix";
 /* ---------- music helpers ---------- */
 const NAMES=["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
 const nn=m=>NAMES[((Math.round(m)%12)+12)%12]+(Math.floor(Math.round(m)/12)-1);
@@ -544,8 +544,10 @@ async function startExercise(ex){
     song=new Audio();song.src=URL.createObjectURL(bk.blob);song.preservesPitch=true;song.playbackRate=tempo;song.playsInline=true;
     try{const g=AC.createGain();g.gain.value=S.trackVol??0.7;AC.createMediaElementSource(song).connect(g);g.connect(myBus);}catch(e){}
     const first=Math.min(...tl.notes.map(n=>n.t));const startAt=Math.max(0,first+bk.off-4);
-    song.currentTime=startAt;
-    try{await song.play();}catch(e){stage.remove();showError("The song couldn’t play ("+(e.name||e.message)+"). Try Replace song with an .m4a or .mp3 file.");return;}
+    song.preload="auto";
+    await Promise.race([new Promise(r=>{if(song.readyState>=1)r();else song.addEventListener("loadedmetadata",r,{once:true});}),wait(4000)]);
+    try{song.currentTime=startAt;}catch(e){}
+    try{await song.play();if(Math.abs(song.currentTime-startAt)>1){song.currentTime=startAt;}}catch(e){stage.remove();showError("The song couldn’t play ("+(e.name||e.message)+"). Try Replace song with an .m4a or .mp3 file.");return;}
     if(S.guide>0)tl.notes.forEach(n=>{const at=AC.currentTime+(n.t-(startAt-bk.off))/tempo;if(at>AC.currentTime)tone(n.m,at,n.dur/tempo,S.guide*.6);});
   }else if(!breath){for(let i=0;i<4;i++)click(AC.currentTime+.15+i*spb,i===0);tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,S.guide));}
   const trail=[],frames=[];let smooth=[];
@@ -580,6 +582,7 @@ async function startExercise(ex){
       if(nextN&&nextN.t-st<0.25)fb=nextN;else if(prevN&&st-(prevN.t+prevN.dur)<0.6)fb=prevN;}
     if(st>=0&&st<=tl.total+.3){trail.push({t:tS,m});if(cur&&m!=null&&tS-cur.t>0.12)frames.push({i:tl.notes.indexOf(cur),c:centsOff(m,cur.m)});}
     updateMeter(meter,fb,m,st<0?tl.notes[0]:null);
+    if(song&&!fb){const nxt=tl.notes.find(n=>n.t>st);if(nxt&&nxt.t-st>1.5){const tg=meter.querySelector(".tgt");tg.textContent="NEXT NOTE "+nn(nxt.m)+" IN "+Math.ceil(nxt.t-st)+"S";}}
     drawStage(run,st,lo,hi,fb,m);
     prog.firstChild.style.width=Math.max(0,Math.min(100,st/tl.total*100))+"%";
     if(st>tl.total+.6||(song&&song.ended))stop(true);
