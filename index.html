@@ -178,7 +178,7 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 
 <script>
 "use strict";
-const APP_VERSION="1.5 · grand piano";
+const APP_VERSION="1.6 · sing-along";
 /* ---------- music helpers ---------- */
 const NAMES=["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
 const nn=m=>NAMES[((Math.round(m)%12)+12)%12]+(Math.floor(Math.round(m)/12)-1);
@@ -300,6 +300,9 @@ function render(){
   if(tab==="melodies"){
     w.append(el("div",{},el("h1",{},"Your ",el("em",{},"melodies")),el("p",{class:"sub"},"When we finish a melody in REAPER, Claude saves its MIDI file to your iCloud Drive. Tap Import, pick the file, and it lands here.")));
     const fi=el("input",{type:"file",id:"midiFile",accept:".mid,.midi,audio/midi,audio/x-midi",hidden:true,onchange:e=>importMidi(e.target.files[0])});
+    const af=el("input",{type:"file",id:"songFile",accept:"audio/*,.m4a,.mp3,.wav,.aac",hidden:true,onchange:e=>{const f=e.target.files[0];e.target.value="";if(f)startFree(f);}});
+    w.append(el("button",{class:"hero press",onclick:()=>af.click()},af,el("span",{class:"k"},"Sing along"),el("span",{class:"t"},"Sing over a song"),
+      el("span",{class:"g"},"Pick a song file you own. It plays in your headphones while the app shows your live pitch, the note you’re on and how centred it is."),el("span",{class:"go"},"♪  Choose a song")));
     w.append(fi,el("button",{class:"btn ghost press",onclick:()=>fi.click()},"＋  Import MIDI file"));
     if(!db) w.append(el("div",{class:"err"},"The melody library isn’t available in this view. Open the app from your Claude account to see saved melodies. Imports still work for this session."));
     if(dbState==="loading") w.append(el("div",{class:"empty"},"Loading your melodies…"));
@@ -628,6 +631,90 @@ function breathFrame(R,st,rms){
     if(h.db>-55&&pr){g.strokeStyle=R.base==null||Math.abs(h.db-R.base)<=4?css("--good"):css("--warn");g.beginPath();g.moveTo(pr.x,pr.y);g.lineTo(x,yy);g.stroke();}
     pr=h.db>-55?{x,y:yy}:null;}
   R.prog.firstChild.style.width=Math.max(0,Math.min(100,st/R.ex.secs*100))+"%";
+}
+/* ---------- sing-along (free pitch over the user's own track) ---------- */
+async function startFree(file){
+  const stage=el("div",{class:"stage",role:"dialog","aria-label":"Sing along"});
+  const cv=el("canvas");
+  const meter=el("div",{class:"meter",role:"status"},
+    el("div",{class:"top"},el("span",{class:"big"},"–"),el("span",{class:"msg"},"Loading song…")),
+    el("div",{class:"track"},el("div",{class:"zone"}),el("div",{class:"needle",style:"left:50%"}),el("div",{class:"ends"},el("span",{},"↑ flat"),el("span",{},"sharp ↓"))),
+    el("div",{class:"tgt",style:"margin-top:14px"},file.name.replace(/\.[^.]+$/,"").toUpperCase().slice(0,40)));
+  const close=el("button",{class:"round","aria-label":"Close without saving",onclick:()=>end(false)},"✕");
+  const finish=el("button",{class:"round","aria-label":"Finish and see results",onclick:()=>end(true)},"■");
+  const pp=el("button",{class:"round","aria-label":"Pause",style:"position:absolute;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 40px);width:64px;height:64px;font-size:20px"},"❚❚");
+  const vol=el("input",{type:"range",id:"trackVol",min:0,max:1,step:.05,value:S.trackVol??0.7,"aria-label":"Song volume",style:"position:absolute;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(env(safe-area-inset-bottom,0px) + 56px);width:110px"});
+  const prog=el("div",{class:"progress",style:"bottom:calc(env(safe-area-inset-bottom,0px) + 14px)"},el("i"));
+  stage.append(cv,el("div",{class:"hud"},close,meter,finish),pp,vol,prog);document.body.append(stage);
+  {const z=meter.querySelector(".zone");const q=S.tol/50*50;z.style.left=(50-q)+"%";z.style.width=(2*q)+"%";}
+  let audioBuf;
+  try{await ensureAudio();}catch(e){stage.remove();showMicError(e);return;}
+  try{const ab=await file.arrayBuffer();audioBuf=await new Promise((res,rej)=>AC.decodeAudioData(ab,res,rej));}
+  catch(e){stage.remove();showError("That file couldn’t be played. Songs bought on iTunes (.m4a) and MP3s work. Apple Music streaming downloads are protected and can’t be opened by other apps.");return;}
+  const bus=makeBus();const tg=AC.createGain();tg.gain.value=+vol.value;tg.connect(bus);
+  vol.addEventListener("input",()=>{tg.gain.value=+vol.value;S.trackVol=+vol.value;saveS();});
+  let src=null,offset=0,startedAt=0,playing=false;
+  const play=()=>{src=AC.createBufferSource();src.buffer=audioBuf;src.connect(tg);src.start(0,offset);startedAt=AC.currentTime-offset;playing=true;pp.textContent="❚❚";pp.setAttribute("aria-label","Pause");
+    src.onended=()=>{if(playing&&songTime()>=audioBuf.duration-.05)end(true);};};
+  const pause=()=>{if(!playing)return;offset=songTime();playing=false;try{src.onended=null;src.stop();}catch(e){}pp.textContent="▶";pp.setAttribute("aria-label","Play");};
+  const songTime=()=>playing?AC.currentTime-startedAt:offset;
+  pp.addEventListener("click",()=>{if(AC.state!=="running")AC.resume().catch(()=>{});playing?pause():play();});
+  const trail=[];const frames=[];let smooth=[],lastM=null,lastSeen=-9,raf=0,done=false;
+  const R={name:"Sing-along · "+file.name.replace(/\.[^.]+$/,"")};
+  function end(save){if(done)return;done=true;cancelAnimationFrame(raf);pause();try{bus.disconnect();}catch(e){}stage.remove();if(save)showFreeResults(R,frames,audioBuf.duration);}
+  play();
+  const lo=Math.min(S.low,48)-4,hi=Math.max(S.high,64)+4;
+  const loop=()=>{if(done)return;raf=requestAnimationFrame(loop);
+    const st=songTime();
+    analyser.getFloatTimeDomainData(buf);const p=yin(buf,AC.sampleRate);
+    let m=p.f>0?hz2m(p.f,S.a4):null;
+    if(m!=null&&lastM!=null){const d=m-lastM;if(Math.abs(Math.abs(d)-12)<0.6)m-=Math.sign(d)*12;}
+    if(m!=null){smooth.push(m);if(smooth.length>3)smooth.shift();const so=[...smooth].sort((a,b)=>a-b);m=so[so.length>>1];lastM=m;lastSeen=st;}
+    else{smooth=[];if(lastM!=null&&st-lastSeen<0.15)m=lastM;else lastM=null;}
+    if(playing){trail.push({t:st,m});if(m!=null)frames.push({t:st,m});if(trail.length>4000)trail.splice(0,1000);}
+    // meter: nearest note and how centred it is
+    const big=meter.querySelector(".big"),msg=meter.querySelector(".msg"),nd=meter.querySelector(".needle");
+    if(m==null){big.textContent="–";big.style.color=css("--muted");msg.textContent=playing?"Sing":"Paused";msg.style.color=css("--muted");nd.style.background=css("--muted");}
+    else{const near=Math.round(m),c=(m-near)*100,col=colorFor(c);big.textContent=nn(near);big.style.color=col;
+      msg.textContent=(c>0?"+":"")+Math.round(c)+"¢ "+(Math.abs(c)<=S.tol?"centred":c>0?"sharp":"flat");msg.style.color=col;
+      nd.style.left=(50+Math.max(-50,Math.min(50,c)))+"%";nd.style.background=col;nd.style.boxShadow="0 0 0 3px "+css("--bg")+",0 0 16px "+col;}
+    prog.firstChild.style.width=Math.min(100,st/audioBuf.duration*100)+"%";
+    // draw
+    const {g,W,H}=fitCanvas(cv);g.clearRect(0,0,W,H);
+    const top=150,bot=H-110,rowH=(bot-top)/(hi-lo);const y=mm=>bot-(mm-lo)*rowH;const hx=Math.round(W*.72),px=Math.min(150,W*.36);const X=t=>hx+(t-st)*px;
+    g.font="700 10.5px "+css("--f-body");g.textBaseline="middle";
+    for(let k=Math.ceil(lo);k<=hi;k++){const yy=y(k);const pc=((k%12)+12)%12;const nat=[0,2,4,5,7,9,11].includes(pc);
+      g.fillStyle=pc===0?css("--gridStrong"):css("--grid");if(nat)g.fillRect(40,yy-.5,W,1);g.fillStyle=css("--muted");g.globalAlpha=nat?.85:.4;g.fillText(nn(k),10,yy);g.globalAlpha=1;}
+    if(m!=null){const near=Math.round(m);g.fillStyle=css("--glow");rr(g,40,y(near)-rowH*.5,W-40,rowH,rowH/2);g.fill();}
+    g.strokeStyle=css("--brass");g.globalAlpha=.5;g.lineWidth=2;g.beginPath();g.moveTo(hx,top-30);g.lineTo(hx,bot+20);g.stroke();g.globalAlpha=1;
+    g.lineWidth=4.5;g.lineCap="round";g.lineJoin="round";let prev=null;
+    for(const q of trail){if(q.m==null||q.m<lo-2||q.m>hi+2){prev=null;continue;}const x=X(q.t);if(x<0){prev=q;continue;}
+      if(prev&&prev.m!=null&&Math.abs(prev.m-q.m)<3&&q.t-prev.t<0.25){const c=colorFor((q.m-Math.round(q.m))*100);g.strokeStyle=c;g.shadowColor=c;g.shadowBlur=8;g.beginPath();g.moveTo(X(prev.t),y(prev.m));g.lineTo(x,y(q.m));g.stroke();}
+      prev=q;}
+    g.shadowBlur=0;
+    if(m!=null&&m>lo-2&&m<hi+2){const c=colorFor((m-Math.round(m))*100);g.fillStyle=c;g.shadowColor=c;g.shadowBlur=18;g.beginPath();g.arc(hx,y(m),8,0,7);g.fill();g.shadowBlur=0;}
+  };
+  raf=requestAnimationFrame(loop);
+}
+function showFreeResults(R,frames,dur){
+  const sh=el("div",{class:"sheet",role:"dialog","aria-label":"Sing-along results"});const body=el("div",{class:"view"});const w=el("div",{class:"wrap"});body.append(w);
+  sh.append(el("div",{class:"bar"},el("span"),el("button",{class:"x","aria-label":"Close",onclick:()=>sh.remove()},"✕")),body);
+  const sung=frames.length?(frames[frames.length-1].t-frames[0].t):0;
+  const cs=frames.map(f=>(f.m-Math.round(f.m))*100);
+  const acc=cs.length?Math.round(100*cs.filter(c=>Math.abs(c)<=S.tol).length/cs.length):0;
+  const bias=cs.length?Math.round(median(cs)):null;
+  const ms=frames.map(f=>f.m).sort((a,b)=>a-b);const low=ms.length?ms[Math.floor(ms.length*.03)]:null,high=ms.length?ms[Math.floor(ms.length*.97)]:null;
+  // steadiness on sustained stretches: frames within 0.6 semitone of a held note for > 0.4 s
+  let holds=[],cur=[];for(const f of frames){if(cur.length&&(Math.abs(f.m-cur[0].m)>.6||f.t-cur[cur.length-1].t>.1)){if(cur[cur.length-1].t-cur[0].t>.4)holds.push(cur);cur=[];}cur.push(f);}
+  if(cur.length&&cur[cur.length-1].t-cur[0].t>.4)holds.push(cur);
+  const steady=holds.length?Math.round(mean(holds.map(h=>stdev(h.map(f=>f.m*100))))):null;
+  w.append(el("div",{style:"text-align:center;margin-top:16px"},el("h2",{style:"color:var(--brass)"},R.name),el("div",{class:"score",style:"margin-top:12px"},acc+"%"),
+    el("p",{class:"sub"},"Of the time you sang, this share was centred on a note (within ±"+S.tol+"¢).")),
+    el("div",{class:"stats"},stat(bias==null?"–":biasText(bias),"Tendency"),stat(steady==null?"–":"±"+steady+"¢","Wobble on holds"),stat(low==null?"–":nn(low)+"–"+nn(high),"Range used")),
+    el("p",{class:"note"},"Sing-along can’t know the song’s melody, so it scores how centred your notes are, not whether they’re the right notes. To check the right notes, import a MIDI of the vocal line as a melody."));
+  w.append(el("div",{class:"row sticky"},el("button",{class:"btn brass press",style:"flex:1",onclick:()=>sh.remove()},"Done")));
+  document.body.append(sh);
+  if(frames.length>20)db.collection("sessions").add({at:Date.now(),exId:"free",name:R.name,kind:"free",acc,bias,steadyC:steady,low:low==null?null:Math.round(low),high:high==null?null:Math.round(high),secs:Math.round(sung)});
 }
 function showError(msg){
   const sh=el("div",{class:"sheet",role:"alertdialog"},el("div",{class:"bar"},el("span"),el("button",{class:"x","aria-label":"Close",onclick:()=>sh.remove()},"✕")),el("div",{class:"view"},el("div",{class:"wrap"},el("h1",{},"Something went wrong"),el("div",{class:"err"},msg))));
