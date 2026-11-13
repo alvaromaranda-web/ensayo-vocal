@@ -146,6 +146,11 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 .track .zone{position:absolute;top:-3px;bottom:-3px;border-radius:99px;background:color-mix(in srgb,var(--good) 35%,transparent);border:1px solid var(--good)}
 .track .needle{position:absolute;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:var(--ink);box-shadow:0 0 0 3px var(--bg),0 0 14px var(--ink);transition:left .06s linear,background .1s}
 .track .ends{position:absolute;top:14px;left:0;right:0;display:flex;justify-content:space-between;font-size:10px;font-weight:800;color:var(--muted)}
+.toast{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);padding:10px 18px;border-radius:99px;background:color-mix(in srgb,var(--surface) 85%,transparent);border:1px solid var(--line);font-weight:800;font-size:15px;pointer-events:none;opacity:0;transition:opacity .25s}
+.toast.on{opacity:1}
+.loopb{position:absolute;left:max(14px,env(safe-area-inset-left,0px));bottom:calc(env(safe-area-inset-bottom,0px) + 34px);border-radius:99px;padding:10px 16px;font-weight:800;font-size:13px;border:1px solid var(--line);background:color-mix(in srgb,var(--surface) 85%,transparent);color:var(--ink)}
+.loopb.on{background:var(--brass);color:var(--brass-ink);border-color:var(--brass)}
+.hint{position:absolute;right:max(14px,env(safe-area-inset-right,0px));bottom:calc(env(safe-area-inset-bottom,0px) + 40px);font-size:11px;color:var(--muted);font-weight:700;text-align:right;line-height:1.4;pointer-events:none}
 .count{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--f-display);font-size:120px;pointer-events:none;color:var(--brass);text-shadow:0 0 40px var(--glow)}
 .progress{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 18px);width:min(60%,260px);height:4px;border-radius:9px;background:var(--line);overflow:hidden}
 .progress i{display:block;height:100%;width:0;background:var(--brass)}
@@ -178,7 +183,7 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 
 <script>
 "use strict";
-const APP_VERSION="1.7.1 · backing sync fix";
+const APP_VERSION="1.8 · loop, fade, seek, skip gaps";
 /* ---------- music helpers ---------- */
 const NAMES=["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
 const nn=m=>NAMES[((Math.round(m)%12)+12)%12]+(Math.floor(Math.round(m)/12)-1);
@@ -191,7 +196,7 @@ function fitCanvas(cv){if(!cv.isConnected)return {g:cv.getContext("2d"),W:0,H:0}
 function rr(g,x,y,w,h,r){r=Math.min(r,h/2,w/2);g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath();}
 
 /* ---------- settings (per device) ---------- */
-const DEF={low:48,high:63,a4:440,tol:25,guide:0.55,octaveFree:false,record:false};
+const DEF={low:48,high:63,a4:440,tol:25,guide:0.55,octaveFree:false,record:false,guideFade:"fade",skipGaps:true};
 let S=Object.assign({},DEF);
 try{Object.assign(S,JSON.parse(localStorage.getItem("ensayo.settings")||"{}"));}catch(e){}
 const saveS=()=>{try{localStorage.setItem("ensayo.settings",JSON.stringify(S));}catch(e){}};
@@ -391,7 +396,10 @@ function openPre(ex){
     w.append(info,el("div",{class:"ctrls"},
       el("div",{class:"ctl"},el("div",{class:"lbl"},"Key",el("small",{},"Half steps up or down")),el("div",{class:"step"},el("button",{"aria-label":"Lower",onclick:()=>{preState.tr--;refresh();}},"−"),keyOut,el("button",{"aria-label":"Higher",onclick:()=>{preState.tr++;refresh();}},"+"))),
       el("div",{class:"ctl"},el("div",{class:"lbl"},"Speed"),el("div",{class:"step"},el("button",{"aria-label":"Slower",onclick:()=>{preState.tempo=Math.max(.5,+(preState.tempo-.1).toFixed(2));refresh();}},"−"),tOut,el("button",{"aria-label":"Faster",onclick:()=>{preState.tempo=Math.min(1.25,+(preState.tempo+.1).toFixed(2));refresh();}},"+"))),
-      el("div",{class:"ctl"},el("div",{class:"lbl"},"Guide tone"),el("input",{type:"range",id:"guideVol",min:0,max:1,step:.05,value:S.guide,"aria-label":"Guide tone volume",oninput:e=>{S.guide=+e.target.value;saveS();}}))),
+      el("div",{class:"ctl"},el("div",{class:"lbl"},"Guide tone"),el("input",{type:"range",id:"guideVol",min:0,max:1,step:.05,value:S.guide,"aria-label":"Guide tone volume",oninput:e=>{S.guide=+e.target.value;saveS();}})),
+      el("div",{class:"ctl"},el("div",{class:"lbl"},"Guide on repeats",el("small",{},"Loops and “Again” runs")),el("select",{id:"guideFade",onchange:e=>{S.guideFade=e.target.value;saveS();}},
+        [["full","Always full"],["fade","Fade out"],["off","Off after first"]].map(([v,t])=>el("option",{value:v,selected:S.guideFade===v?"selected":false},t)))),
+      el("div",{class:"ctl"},el("div",{class:"lbl"},"Skip long silences",el("small",{},"Jump ahead when nothing is sung for 5 s")),el("input",{type:"checkbox",class:"sw",id:"skipGaps",checked:S.skipGaps?"checked":false,onchange:e=>{S.skipGaps=e.target.checked;saveS();}}))),
       el("button",{class:"btn ghost press",onclick:()=>previewPlay(ex)},"▶  Hear it first"),el("p",{class:"note",style:"text-align:center;margin-top:-10px"},"No sound? Turn the volume up. With the mic on, iPhone can play quietly through the speaker, so headphones work best."));
     requestAnimationFrame(refresh);
     if(ex.kind==="melody"&&ex.id) w.append(backingBlock(ex));
@@ -517,7 +525,7 @@ function yin(b,sr){
 
 /* ---------- singing stage ---------- */
 let run=null;
-async function startExercise(ex){
+async function startExercise(ex,attempt=0){
   const breath=ex.kind==="breath";
   const stage=el("div",{class:"stage",role:"dialog","aria-label":ex.name});
   const cv=el("canvas");
@@ -528,8 +536,12 @@ async function startExercise(ex){
   const stopB=el("button",{class:"round","aria-label":"Finish now",onclick:()=>stop(true)},"■");
   const close=el("button",{class:"round","aria-label":"Close without saving",onclick:()=>stop(false)},"✕");
   const count=el("div",{class:"count"});const prog=el("div",{class:"progress"},el("i"));
-  stage.append(cv,el("div",{class:"hud"},close,meter,stopB),count,prog);document.body.append(stage);
-  if(!breath){const z=meter.querySelector(".zone");const p=S.tol/50*50;z.style.left=(50-p)+"%";z.style.width=(2*p)+"%";}
+  const toast=el("div",{class:"toast"});
+  const loopB=breath?null:el("button",{class:"loopb","aria-label":"Loop a section"},"⟲ Loop: mark start");
+  stage.append(cv,el("div",{class:"hud"},close,meter,stopB),count,prog,toast);
+  if(loopB)stage.append(loopB,el("div",{class:"hint"},"Double-tap left −10 s","Double-tap right +10 s"));
+  document.body.append(stage);
+  if(!breath){const z=meter.querySelector(".zone");const q=S.tol/50*50;z.style.left=(50-q)+"%";z.style.width=(2*q)+"%";}
   try{await ensureAudio();}catch(e){stage.remove();showMicError(e);return;}
   if(!breath)await Promise.race([loadPiano(),wait(4000)]);
   let rec=null;const chunks=[];
@@ -537,26 +549,60 @@ async function startExercise(ex){
   const bk=(ex.kind==="melody"&&preState&&preState.backing&&preState.backing.use!==false)?preState.backing:null;
   const tempo=preState?preState.tempo:1;
   const tl=buildTimeline(bk?Object.assign({},ex,{_backing:true}):ex,preState?preState.tr:0,bk?1:tempo);
-  const myBus=makeBus();
-  const spb=60/(tl.bpm||80);const lead=breath?3:(bk?0:4*spb);const t0=AC.currentTime+lead+.15;
-  let song=null;
-  if(bk){ // the song is the clock: MIDI time = song time - offset
-    song=new Audio();song.src=URL.createObjectURL(bk.blob);song.preservesPitch=true;song.playbackRate=tempo;song.playsInline=true;
-    try{const g=AC.createGain();g.gain.value=S.trackVol??0.7;AC.createMediaElementSource(song).connect(g);g.connect(myBus);}catch(e){}
+  const spb=60/(tl.bpm||80);const lead=breath?3:(bk?0:4*spb);let t0=AC.currentTime+lead+.15;
+  // guide volume for this pass: fades on repeats ("Again" runs and loop passes)
+  const fadeFor=pass=>S.guideFade==="full"?1:S.guideFade==="off"?(pass>0?0:1):[1,.5,.25,0][Math.min(3,pass)];
+  let pass=attempt;
+  let song=null,songGain=null;
+  const rate=bk?tempo:1; // real seconds per timeline second = 1/rate
+  function schedule(fromSt){ // (re)schedule guide notes from timeline position fromSt
+    makeBus();const v=S.guide*fadeFor(pass);if(v<=0)return;
+    const base=song?AC.currentTime:t0;
+    for(const n of tl.notes){if(n.t<fromSt-0.02)continue;const at=song?base+(n.t-fromSt)/rate:base+n.t;if(at<AC.currentTime-0.01)continue;tone(n.m,at,n.dur/rate,song?v*.6:v);}
+  }
+  if(bk){ // the song is the clock: timeline time = song time - offset
+    song=new Audio();song.src=URL.createObjectURL(bk.blob);song.preservesPitch=true;song.playbackRate=tempo;song.playsInline=true;song.preload="auto";
+    try{songGain=AC.createGain();songGain.gain.value=S.trackVol??0.7;AC.createMediaElementSource(song).connect(songGain);songGain.connect(AC.destination);}catch(e){}
     const first=Math.min(...tl.notes.map(n=>n.t));const startAt=Math.max(0,first+bk.off-4);
-    song.preload="auto";
     await Promise.race([new Promise(r=>{if(song.readyState>=1)r();else song.addEventListener("loadedmetadata",r,{once:true});}),wait(4000)]);
     try{song.currentTime=startAt;}catch(e){}
     try{await song.play();if(Math.abs(song.currentTime-startAt)>1){song.currentTime=startAt;}}catch(e){stage.remove();showError("The song couldn’t play ("+(e.name||e.message)+"). Try Replace song with an .m4a or .mp3 file.");return;}
-    if(S.guide>0)tl.notes.forEach(n=>{const at=AC.currentTime+(n.t-(startAt-bk.off))/tempo;if(at>AC.currentTime)tone(n.m,at,n.dur/tempo,S.guide*.6);});
-  }else if(!breath){for(let i=0;i<4;i++)click(AC.currentTime+.15+i*spb,i===0);tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,S.guide));}
+    schedule(startAt-bk.off);
+  }else if(!breath){makeBus();for(let i=0;i<4;i++)click(AC.currentTime+.15+i*spb,i===0);schedule(0);}
+  else makeBus();
   const trail=[],frames=[];let smooth=[];
-  run={ex,tl,t0,trail,frames,stage,cv,meter,count,prog,rec,chunks,breath,done:false,levels:[],hist:[]};
+  run={ex,tl,t0,trail,frames,stage,cv,meter,count,prog,rec,chunks,breath,done:false,levels:[],hist:[],attempt,loop:null};
   const lo=breath?0:Math.min(...tl.notes.map(n=>n.m))-4,hi=breath?0:Math.max(...tl.notes.map(n=>n.m))+4;
+  const now=()=>song?(song.currentTime-bk.off):AC.currentTime-t0;
+  let toastT=0;const say=t=>{toast.textContent=t;toast.classList.add("on");clearTimeout(toastT);toastT=setTimeout(()=>toast.classList.remove("on"),900);};
+  function seek(newSt,label){
+    if(breath)return;
+    newSt=Math.max(song?-bk.off:-0.5,Math.min(tl.total-0.2,newSt));
+    const back=newSt<now();
+    if(song){try{song.currentTime=Math.max(0,newSt+bk.off);}catch(e){}}else{t0=AC.currentTime-newSt;run.t0=t0;}
+    if(back){for(let i=trail.length-1;i>=0;i--)if(trail[i].t>=newSt-0.05)trail.splice(i,1);
+      for(let i=frames.length-1;i>=0;i--)if(tl.notes[frames[i].i].t>=newSt-0.05)frames.splice(i,1);}
+    else{for(let i=trail.length-1;i>=0;i--)if(trail[i].t>newSt)trail.splice(i,1);trail.push({t:newSt,m:null});}
+    run.lastM=null;smooth=[];schedule(newSt);if(label)say(label);
+  }
+  // loop: first tap marks the start (snapped to a note), second the end, third clears
+  if(loopB)loopB.addEventListener("click",()=>{
+    const st=now();
+    if(!run.loop){const n=tl.notes.find(n=>n.t+n.dur>st)||tl.notes[tl.notes.length-1];run.loop={a:Math.min(n.t,st),b:null,reps:0};loopB.textContent="⟲ Loop: mark end";loopB.classList.add("on");say("Loop start set");}
+    else if(run.loop.b==null){const cur=[...tl.notes].reverse().find(n=>n.t<=st);const b=cur?Math.max(st,cur.t+cur.dur):st;if(b-run.loop.a<1){say("Loop is too short");return;}
+      run.loop.b=b;loopB.textContent="⟲ Looping · tap to clear";say("Looping");seek(run.loop.a-1);}
+    else{run.loop=null;loopB.textContent="⟲ Loop: mark start";loopB.classList.remove("on");say("Loop cleared");}
+  });
+  // double-tap left/right to jump 10 s; single tap wakes paused audio
+  let lastTap={t:0,side:""};
+  stage.addEventListener("pointerdown",e=>{if(e.target.closest("button")||e.target.closest(".meter")||e.target.closest("input"))return;
+    if(AC&&AC.state!=="running")AC.resume().catch(()=>{});
+    if(breath)return;const side=e.clientX<window.innerWidth/2?"L":"R";const t=performance.now();
+    if(t-lastTap.t<320&&lastTap.side===side){lastTap={t:0,side:""};seek(now()+(side==="L"?-10:10),side==="L"?"⟲ −10 s":"+10 s ⟳");}else lastTap={t,side};});
   function stop(finish){
     if(run.done)return;run.done=true;cancelAnimationFrame(run.raf);
-    try{myBus.gain.setValueAtTime(0,AC.currentTime);myBus.disconnect();}catch(e){}
-    if(song){try{song.pause();URL.revokeObjectURL(song.src);}catch(e){}}
+    try{BUS.gain.setValueAtTime(0,AC.currentTime);BUS.disconnect();}catch(e){}
+    if(song){try{song.pause();songGain&&songGain.disconnect();URL.revokeObjectURL(song.src);}catch(e){}}
     const fin=()=>{stage.remove();if(finish)showResults(run);};
     if(rec&&rec.state!=="inactive"){rec.onstop=()=>{run.blob=new Blob(chunks,{type:rec.mimeType||"audio/mp4"});fin();};rec.stop();}else fin();
   }
@@ -567,28 +613,31 @@ async function startExercise(ex){
     if(run.lastCT===nowCT){if(wall-run.frozenAt>600&&!run.reviving){run.reviving=true;AC.resume().catch(()=>{}).finally(()=>{run.reviving=false;});}
       if(wall-run.frozenAt>1500){meter.querySelector(".msg").textContent="Audio paused · tap the screen";meter.querySelector(".msg").style.color=css("--warn");}return;}
     run.lastCT=nowCT;run.frozenAt=wall;
-    const st=song?(song.currentTime-bk.off):nowCT-t0;const st0=()=>st;
+    const st=now();
     analyser.getFloatTimeDomainData(buf);const p=yin(buf,AC.sampleRate);
     if(breath){breathFrame(run,st,p.rms);return;}
+    // loop back at the end of the loop
+    if(run.loop&&run.loop.b!=null&&st>=run.loop.b+0.3){run.loop.reps++;pass++;seek(run.loop.a-1,"Loop "+(run.loop.reps+1)+(fadeFor(pass)<1?(fadeFor(pass)>0?" · guide softer":" · on your own"):""));return;}
+    // skip long silences: if nothing is sung for the next 5 s, jump to 2 s before the next note
+    if(S.skipGaps&&st>=0){const i=tl.notes.findIndex(n=>n.t>st);if(i>=0){const nxt=tl.notes[i];const prevEnd=i>0?tl.notes[i-1].t+tl.notes[i-1].dur:-1e9;
+      if(nxt.t-st>5&&st-prevEnd>0.8&&!(run.loop&&run.loop.b!=null&&nxt.t>run.loop.b)){seek(nxt.t-2,"Skipped silence ⏭");return;}}}
     let m=p.f>0?hz2m(p.f,S.a4):null;
     if(m!=null&&run.lastM!=null){const d=m-run.lastM;if(Math.abs(Math.abs(d)-12)<0.6)m-=Math.sign(d)*12;}
-    if(m!=null){smooth.push(m);if(smooth.length>3)smooth.shift();const s=[...smooth].sort((a,b)=>a-b);m=s[s.length>>1];run.lastM=m;run.lastSeen=st0();}
-    else{smooth=[];if(run.lastM!=null&&st0()-run.lastSeen<0.15)m=run.lastM;else run.lastM=null;}
-    const tS=st-0.03*(song?tempo:1);
+    if(m!=null){smooth.push(m);if(smooth.length>3)smooth.shift();const so=[...smooth].sort((a,c)=>a-c);m=so[so.length>>1];run.lastM=m;run.lastSeen=st;}
+    else{smooth=[];if(run.lastM!=null&&st-run.lastSeen<0.15)m=run.lastM;else run.lastM=null;}
+    const tS=st-0.03*rate;
     count.textContent=(!song&&st<0)?(Math.ceil(-st/spb)||""):"";
     const cur=tl.notes.find(n=>st>=n.t&&st<n.t+n.dur);
-    // between notes, keep coaching against the note just sung (or the next one if it starts soon)
     let fb=cur;if(!fb&&st>=0){const i=tl.notes.findIndex(n=>n.t>st);const prevN=i<0?tl.notes[tl.notes.length-1]:tl.notes[i-1];const nextN=i<0?null:tl.notes[i];
       if(nextN&&nextN.t-st<0.25)fb=nextN;else if(prevN&&st-(prevN.t+prevN.dur)<0.6)fb=prevN;}
     if(st>=0&&st<=tl.total+.3){trail.push({t:tS,m});if(cur&&m!=null&&tS-cur.t>0.12)frames.push({i:tl.notes.indexOf(cur),c:centsOff(m,cur.m)});}
     updateMeter(meter,fb,m,st<0?tl.notes[0]:null);
-    if(song&&!fb){const nxt=tl.notes.find(n=>n.t>st);if(nxt&&nxt.t-st>1.5){const tg=meter.querySelector(".tgt");tg.textContent="NEXT NOTE "+nn(nxt.m)+" IN "+Math.ceil(nxt.t-st)+"S";}}
+    if(!fb){const nxt=tl.notes.find(n=>n.t>st);if(nxt&&nxt.t-st>1.5&&st>=0){meter.querySelector(".tgt").textContent="NEXT NOTE "+nn(nxt.m)+" IN "+Math.ceil(nxt.t-st)+"S";}}
     drawStage(run,st,lo,hi,fb,m);
     prog.firstChild.style.width=Math.max(0,Math.min(100,st/tl.total*100))+"%";
-    if(st>tl.total+.6||(song&&song.ended))stop(true);
+    if(!run.loop&&(st>tl.total+.6||(song&&song.ended)))stop(true);
   };
   run.frozenAt=performance.now();run.lastCT=-1;
-  stage.addEventListener("pointerdown",e=>{if(e.target.closest("button"))return;if(AC&&AC.state!=="running")AC.resume().catch(()=>{});});
   run.raf=requestAnimationFrame(loop);
 }
 function centsOff(m,target){let c=(m-target)*100;if(S.octaveFree){c=((c%1200)+1800)%1200-600;}return c;}
@@ -608,6 +657,8 @@ function drawStage(R,st,lo,hi,cur,m){
   const {g,W,H}=fitCanvas(R.cv);g.clearRect(0,0,W,H);
   const top=150,bot=H-56,rowH=(bot-top)/(hi-lo);const y=mm=>bot-(mm-lo)*rowH;
   const px=Math.min(170,W*.42),hx=Math.round(W*.3);const X=t=>hx+(t-st)*px;
+  if(R.loop){const xa=X(R.loop.a),xb=R.loop.b!=null?X(R.loop.b):hx;g.fillStyle=css("--glow");g.fillRect(Math.max(40,xa),top-20,Math.max(0,xb-Math.max(40,xa)),bot-top+30);
+    g.fillStyle=css("--brass");g.fillRect(xa-1,top-20,2,bot-top+30);if(R.loop.b!=null)g.fillRect(xb-1,top-20,2,bot-top+30);}
   g.font="700 10.5px "+css("--f-body");g.textBaseline="middle";
   for(let k=Math.ceil(lo);k<=hi;k++){const yy=y(k);const pc=((k%12)+12)%12;const nat=[0,2,4,5,7,9,11].includes(pc);
     g.fillStyle=pc===0?css("--gridStrong"):css("--grid");if(nat)g.fillRect(40,yy-.5,W,1);
@@ -806,7 +857,7 @@ function showResults(R){
     const file=new File([R.blob],name,{type:R.blob.type||"audio/mp4"});
     try{if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:name});b.textContent="Shared";return;}}catch(err){if(err&&err.name==="AbortError")return;}
     const a=document.createElement("a");a.href=URL.createObjectURL(file);a.download=name;document.body.append(a);a.click();a.remove();b.textContent="Saved";}},"Share take"));}
-  btns.append(el("button",{class:"btn ghost press","aria-label":"Try again",onclick:()=>{sh.remove();startExercise(R.ex);}},"↻"),el("button",{class:"btn brass press",style:"flex:1",onclick:()=>sh.remove()},"Done"));
+  btns.append(el("button",{class:"btn ghost press","aria-label":"Try again",onclick:()=>{sh.remove();startExercise(R.ex,(R.attempt||0)+1);}},"↻"),el("button",{class:"btn brass press",style:"flex:1",onclick:()=>sh.remove()},"Done"));
   w.append(btns);
   document.body.append(sh);
   if(db){db.collection("sessions").add(rec).catch(()=>{});}else{SESS.unshift(rec);}
