@@ -376,7 +376,7 @@ function openPre(ex){
       el("div",{class:"ctl"},el("div",{class:"lbl"},"Key",el("small",{},"Half steps up or down")),el("div",{class:"step"},el("button",{"aria-label":"Lower",onclick:()=>{preState.tr--;refresh();}},"−"),keyOut,el("button",{"aria-label":"Higher",onclick:()=>{preState.tr++;refresh();}},"+"))),
       el("div",{class:"ctl"},el("div",{class:"lbl"},"Speed"),el("div",{class:"step"},el("button",{"aria-label":"Slower",onclick:()=>{preState.tempo=Math.max(.5,+(preState.tempo-.1).toFixed(2));refresh();}},"−"),tOut,el("button",{"aria-label":"Faster",onclick:()=>{preState.tempo=Math.min(1.25,+(preState.tempo+.1).toFixed(2));refresh();}},"+"))),
       el("div",{class:"ctl"},el("div",{class:"lbl"},"Guide tone"),el("input",{type:"range",id:"guideVol",min:0,max:1,step:.05,value:S.guide,"aria-label":"Guide tone volume",oninput:e=>{S.guide=+e.target.value;saveS();}}))),
-      el("button",{class:"btn ghost press",onclick:()=>previewPlay(ex)},"▶  Hear it first"));
+      el("button",{class:"btn ghost press",onclick:()=>previewPlay(ex)},"▶  Hear it first"),el("p",{class:"note",style:"text-align:center;margin-top:-10px"},"No sound? Turn the volume up. With the mic on, iPhone can play quietly through the speaker, so headphones work best."));
     requestAnimationFrame(refresh);
     if(ex.kind==="melody"&&db&&ex.id) w.append(el("button",{class:"btn ghost press",style:"color:var(--sharp)",onclick:e=>confirmDelete(e.currentTarget,ex)},"Remove melody"));
   }
@@ -419,29 +419,40 @@ async function ensureAudio(){
   if(AC.state!=="running")await wake();
   if(!analyser){const src=AC.createMediaStreamSource(stream);analyser=AC.createAnalyser();analyser.fftSize=2048;src.connect(analyser);buf=new Float32Array(analyser.fftSize);}
 }
-function tone(m,t,dur,vol,type="triangle"){
-  if(vol<=0)return;const o=AC.createOscillator(),g=AC.createGain(),f=AC.createBiquadFilter();
-  o.type=type;o.frequency.value=m2hz(m,S.a4);f.type="lowpass";f.frequency.value=1800;
-  g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(vol*.35,t+.02);g.gain.setValueAtTime(vol*.3,t+Math.max(.03,dur-.06));g.gain.linearRampToValueAtTime(0,t+dur);
-  o.connect(f);f.connect(g);g.connect(BUS||AC.destination);o.start(t);o.stop(t+dur+.02);
+function makeBus(){ // guide bus with a compressor so tones are loud on a phone speaker
+  if(BUS){try{BUS.disconnect();}catch(e){}}
+  const comp=AC.createDynamicsCompressor();comp.threshold.value=-20;comp.ratio.value=4;comp.attack.value=.003;comp.release.value=.2;
+  const out=AC.createGain();out.gain.value=1.6;BUS=AC.createGain();BUS.connect(comp);comp.connect(out);out.connect(AC.destination);return BUS;
 }
-function click(t,acc){const o=AC.createOscillator(),g=AC.createGain();o.frequency.value=acc?1500:1000;g.gain.setValueAtTime(.25,t);g.gain.exponentialRampToValueAtTime(.001,t+.06);o.connect(g);g.connect(BUS||AC.destination);o.start(t);o.stop(t+.07);}
+function tone(m,t,dur,vol){
+  if(vol<=0)return;const f0=m2hz(m,S.a4);
+  const o1=AC.createOscillator(),o2=AC.createOscillator(),o3=AC.createOscillator(),g=AC.createGain(),f=AC.createBiquadFilter();
+  o1.type="sawtooth";o1.frequency.value=f0;o2.type="sine";o2.frequency.value=f0*2;o3.type="sine";o3.frequency.value=f0*4;
+  const g2=AC.createGain();g2.gain.value=.6;const g3=AC.createGain();g3.gain.value=.25;
+  f.type="lowpass";f.frequency.value=Math.min(5000,f0*12);f.Q.value=.5;
+  const pk=vol*.55,sus=vol*.38;
+  g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(pk,t+.015);g.gain.exponentialRampToValueAtTime(Math.max(.001,sus),t+.25);
+  g.gain.setValueAtTime(sus,t+Math.max(.26,dur-.08));g.gain.linearRampToValueAtTime(0,t+dur);
+  o1.connect(f);o2.connect(g2);g2.connect(f);o3.connect(g3);g3.connect(f);f.connect(g);g.connect(BUS||AC.destination);
+  [o1,o2,o3].forEach(o=>{o.start(t);o.stop(t+dur+.02);});
+}
+function click(t,acc){const o=AC.createOscillator(),g=AC.createGain();o.frequency.value=acc?1500:1000;g.gain.setValueAtTime(.6,t);g.gain.exponentialRampToValueAtTime(.001,t+.06);o.connect(g);g.connect(BUS||AC.destination);o.start(t);o.stop(t+.07);}
 async function previewPlay(ex){
   if(!stream)setSession("playback");
   try{await wake();}catch(e){return;}
-  if(BUS){try{BUS.disconnect();}catch(e){}}BUS=AC.createGain();BUS.connect(AC.destination);
+  makeBus();
   const tl=buildTimeline(ex,preState.tr,preState.tempo);const t0=AC.currentTime+.1;
   tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,Math.max(.4,S.guide)));
 }
 /* YIN pitch detector */
 function yin(b,sr){
   const N=b.length,half=N>>1;let rms=0;for(let i=0;i<N;i++)rms+=b[i]*b[i];rms=Math.sqrt(rms/N);
-  if(rms<0.008)return {f:-1,rms};
+  if(rms<0.0025)return {f:-1,rms};
   const tmin=Math.floor(sr/1000),tmax=Math.min(half-1,Math.floor(sr/65));const d=new Float32Array(tmax+1);
   for(let tau=1;tau<=tmax;tau++){let s=0;for(let i=0;i<half;i++){const x=b[i]-b[i+tau];s+=x*x;}d[tau]=s;}
   let run=0;d[0]=1;for(let tau=1;tau<=tmax;tau++){run+=d[tau];d[tau]=d[tau]*tau/(run||1);}
-  let tau=-1;for(let t=tmin;t<=tmax;t++){if(d[t]<0.12){while(t+1<=tmax&&d[t+1]<d[t])t++;tau=t;break;}}
-  if(tau<0){let mi=tmin;for(let t=tmin;t<=tmax;t++)if(d[t]<d[mi])mi=t;if(d[mi]<0.22)tau=mi;else return {f:-1,rms};}
+  let tau=-1;for(let t=tmin;t<=tmax;t++){if(d[t]<0.15){while(t+1<=tmax&&d[t+1]<d[t])t++;tau=t;break;}}
+  if(tau<0){let mi=tmin;for(let t=tmin;t<=tmax;t++)if(d[t]<d[mi])mi=t;if(d[mi]<0.32)tau=mi;else return {f:-1,rms};}
   const a=d[tau-1]||d[tau],c=d[tau+1]||d[tau],den=a+c-2*d[tau];const shift=den?(a-c)/(2*den):0;
   return {f:sr/(tau+shift),rms,clar:1-d[tau]};
 }
@@ -465,7 +476,7 @@ async function startExercise(ex){
   let rec=null;const chunks=[];
   if(S.record&&window.MediaRecorder){try{rec=new MediaRecorder(stream);rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};rec.start();}catch(e){rec=null;}}
   const tl=buildTimeline(ex,preState?preState.tr:0,preState?preState.tempo:1);
-  if(BUS){try{BUS.disconnect();}catch(e){}}BUS=AC.createGain();BUS.connect(AC.destination);const myBus=BUS;
+  const myBus=makeBus();
   const spb=60/(tl.bpm||80);const lead=breath?3:4*spb;const t0=AC.currentTime+lead+.15;
   if(!breath){for(let i=0;i<4;i++)click(AC.currentTime+.15+i*spb,i===0);tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,S.guide));}
   const trail=[],frames=[];let smooth=[];
@@ -484,17 +495,22 @@ async function startExercise(ex){
     if(run.lastCT===nowCT){if(wall-run.frozenAt>600&&!run.reviving){run.reviving=true;AC.resume().catch(()=>{}).finally(()=>{run.reviving=false;});}
       if(wall-run.frozenAt>1500){meter.querySelector(".msg").textContent="Audio paused · tap the screen";meter.querySelector(".msg").style.color=css("--warn");}return;}
     run.lastCT=nowCT;run.frozenAt=wall;
-    const st=nowCT-t0;
+    const st=nowCT-t0;const st0=()=>st;
     analyser.getFloatTimeDomainData(buf);const p=yin(buf,AC.sampleRate);
     if(breath){breathFrame(run,st,p.rms);return;}
     let m=p.f>0?hz2m(p.f,S.a4):null;
-    if(m!=null){smooth.push(m);if(smooth.length>3)smooth.shift();const s=[...smooth].sort((a,b)=>a-b);m=s[s.length>>1];}else smooth=[];
+    if(m!=null&&run.lastM!=null){const d=m-run.lastM;if(Math.abs(Math.abs(d)-12)<0.6)m-=Math.sign(d)*12;}
+    if(m!=null){smooth.push(m);if(smooth.length>3)smooth.shift();const s=[...smooth].sort((a,b)=>a-b);m=s[s.length>>1];run.lastM=m;run.lastSeen=st0();}
+    else{smooth=[];if(run.lastM!=null&&st0()-run.lastSeen<0.15)m=run.lastM;else run.lastM=null;}
     const tS=st-0.03;
     count.textContent=st<0?(Math.ceil(-st/spb)||""):"";
     const cur=tl.notes.find(n=>st>=n.t&&st<n.t+n.dur);
+    // between notes, keep coaching against the note just sung (or the next one if it starts soon)
+    let fb=cur;if(!fb&&st>=0){const i=tl.notes.findIndex(n=>n.t>st);const prevN=i<0?tl.notes[tl.notes.length-1]:tl.notes[i-1];const nextN=i<0?null:tl.notes[i];
+      if(nextN&&nextN.t-st<0.25)fb=nextN;else if(prevN&&st-(prevN.t+prevN.dur)<0.6)fb=prevN;}
     if(st>=0&&st<=tl.total+.3){trail.push({t:tS,m});if(cur&&m!=null&&tS-cur.t>0.12)frames.push({i:tl.notes.indexOf(cur),c:centsOff(m,cur.m)});}
-    updateMeter(meter,cur,m,st<0?tl.notes[0]:null);
-    drawStage(run,st,lo,hi,cur,m);
+    updateMeter(meter,fb,m,st<0?tl.notes[0]:null);
+    drawStage(run,st,lo,hi,fb,m);
     prog.firstChild.style.width=Math.max(0,Math.min(100,st/tl.total*100))+"%";
     if(st>tl.total+.6)stop(true);
   };
@@ -535,7 +551,7 @@ function drawStage(R,st,lo,hi,cur,m){
   g.lineWidth=4.5;g.lineCap="round";g.lineJoin="round";
   let prev=null;for(const p of R.trail){if(p.m==null||p.m<lo-2||p.m>hi+2){prev=null;continue;}const x=X(p.t);if(x<-10){prev=p;continue;}
     const tgt=R.tl.notes.find(n=>p.t>=n.t&&p.t<n.t+n.dur);
-    if(prev&&prev.m!=null&&Math.abs(prev.m-p.m)<1.5){const c=tgt?colorFor(centsOff(p.m,tgt.m)):css("--muted");g.strokeStyle=c;g.shadowColor=c;g.shadowBlur=8;g.beginPath();g.moveTo(X(prev.t),y(prev.m));g.lineTo(x,y(p.m));g.stroke();}
+    if(prev&&prev.m!=null&&Math.abs(prev.m-p.m)<3&&p.t-prev.t<0.25){const c=tgt?colorFor(centsOff(p.m,tgt.m)):css("--muted");g.strokeStyle=c;g.shadowColor=c;g.shadowBlur=8;g.beginPath();g.moveTo(X(prev.t),y(prev.m));g.lineTo(x,y(p.m));g.stroke();}
     prev=p;}
   g.shadowBlur=0;
   if(m!=null&&m>lo-2&&m<hi+2){const c=cur?colorFor(centsOff(m,cur.m)):css("--ink");const yy=y(m);
