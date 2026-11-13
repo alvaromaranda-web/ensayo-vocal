@@ -178,7 +178,7 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 
 <script>
 "use strict";
-const APP_VERSION="1.6 · sing-along";
+const APP_VERSION="1.7 · track picker + backing";
 /* ---------- music helpers ---------- */
 const NAMES=["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
 const nn=m=>NAMES[((Math.round(m)%12)+12)%12]+(Math.floor(Math.round(m)/12)-1);
@@ -226,13 +226,18 @@ function initCaps(){
   if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
   render();
 }
+/* ---------- backing tracks (song files) kept in IndexedDB on this phone ---------- */
+const IDB={p:null,open(){return this.p||(this.p=new Promise((res,rej)=>{const r=indexedDB.open("ensayo",1);r.onupgradeneeded=()=>r.result.createObjectStore("tracks");r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);}));},
+  async run(mode,fn){const d=await this.open();return new Promise((res,rej)=>{const tx=d.transaction("tracks",mode);const q=fn(tx.objectStore("tracks"));tx.oncomplete=()=>res(q&&q.result);tx.onerror=()=>rej(tx.error);});},
+  get(k){return this.run("readonly",st=>st.get(k));},set(k,v){return this.run("readwrite",st=>st.put(v,k));},del(k){return this.run("readwrite",st=>st.delete(k));}};
 /* ---------- build a playable timeline ---------- */
 function buildTimeline(src,tr,tempo){
   if(src.kind==="breath"||!src.notes||!src.notes.length)return {notes:[],total:src.secs||0,bpm:60};
   const out=[];let beat=0;const bpm=(src.bpm||80)*tempo;const spb=60/bpm;
   if(src.kind==="melody"){
-    for(const n of src.notes){out.push({t:n.s*spb,dur:n.d*spb,m:n.m+tr,l:n.l||""});}
-    const end=Math.max(...src.notes.map(n=>n.s+n.d));
+    const shift=src._backing?0:Math.max(0,Math.min(...src.notes.map(n=>n.s))-1);
+    for(const n of src.notes){out.push({t:(n.s-shift)*spb,dur:n.d*spb,m:n.m+tr,l:n.l||""});}
+    const end=Math.max(...src.notes.map(n=>n.s+n.d))-shift;
     return {notes:out,total:end*spb,bpm};
   }
   const reps=src.reps||1;
@@ -389,6 +394,7 @@ function openPre(ex){
       el("div",{class:"ctl"},el("div",{class:"lbl"},"Guide tone"),el("input",{type:"range",id:"guideVol",min:0,max:1,step:.05,value:S.guide,"aria-label":"Guide tone volume",oninput:e=>{S.guide=+e.target.value;saveS();}}))),
       el("button",{class:"btn ghost press",onclick:()=>previewPlay(ex)},"▶  Hear it first"),el("p",{class:"note",style:"text-align:center;margin-top:-10px"},"No sound? Turn the volume up. With the mic on, iPhone can play quietly through the speaker, so headphones work best."));
     requestAnimationFrame(refresh);
+    if(ex.kind==="melody"&&ex.id) w.append(backingBlock(ex));
     if(ex.kind==="melody"&&db&&ex.id) w.append(el("button",{class:"btn ghost press",style:"color:var(--sharp)",onclick:e=>confirmDelete(e.currentTarget,ex)},"Remove melody"));
   }
   if(ex.goal)w.append(el("div",{class:"panel howto"},el("div",{},el("h2",{},"Goal"),el("p",{},ex.goal)),el("div",{},el("h2",{},"How"),el("p",{},ex.how))));
@@ -396,6 +402,26 @@ function openPre(ex){
   document.body.append(sh);
   }catch(err){showError("This exercise couldn’t open ("+err.message+"). Tell Claude this message.");}
 }
+function backingBlock(ex){
+  const box=el("div",{class:"ctrls"});
+  const draw=async()=>{
+    box.innerHTML="";let rec=null;try{rec=await IDB.get("m:"+ex.id);}catch(e){}
+    preState.backing=rec||null;
+    const fi=el("input",{type:"file",accept:"audio/*,video/mp4,.m4a,.mp3,.mp4,.wav,.aac",hidden:true,onchange:async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;
+      try{await IDB.set("m:"+ex.id,{blob:f,name:f.name,off:(rec&&rec.off)||0,use:true});}catch(err){box.prepend(el("div",{class:"err"},"Couldn’t save the song on this phone ("+err.message+")."));return;}draw();}});
+    if(!rec){box.append(fi,el("div",{class:"ctl"},el("div",{class:"lbl"},"Backing track",el("small",{},"Play the real song while you sing")),el("button",{class:"btn ghost press",style:"padding:9px 14px;font-size:14px",onclick:()=>fi.click()},"Add song")));return;}
+    const offOut=el("output",{},fmtOff(rec.off));
+    const setOff=async d=>{rec.off=Math.round((rec.off+d)*100)/100;offOut.textContent=fmtOff(rec.off);try{await IDB.set("m:"+ex.id,rec);}catch(e){}};
+    const useSw=el("input",{type:"checkbox",class:"sw",id:"useBacking",checked:rec.use!==false?"checked":false,onchange:async e=>{rec.use=e.target.checked;try{await IDB.set("m:"+ex.id,rec);}catch(err){}}});
+    box.append(fi,
+      el("div",{class:"ctl"},el("div",{class:"lbl"},"Play with song",el("small",{},rec.name.slice(0,34))),useSw),
+      el("div",{class:"ctl"},el("div",{class:"lbl"},"Sync",el("small",{},"If the notes come early, add time; if late, remove")),
+        el("div",{class:"step"},el("button",{"aria-label":"Earlier by one second",onclick:()=>setOff(-1)},"«"),el("button",{"aria-label":"Earlier",onclick:()=>setOff(-.1)},"−"),offOut,el("button",{"aria-label":"Later",onclick:()=>setOff(.1)},"+"),el("button",{"aria-label":"Later by one second",onclick:()=>setOff(1)},"»"))),
+      el("div",{class:"ctl"},el("button",{class:"btn ghost press",style:"padding:9px 14px;font-size:14px",onclick:()=>fi.click()},"Replace song"),el("button",{class:"btn ghost press",style:"padding:9px 14px;font-size:14px;color:var(--sharp)",onclick:async()=>{try{await IDB.del("m:"+ex.id);}catch(e){}draw();}},"Remove song")));
+  };
+  draw();return box;
+}
+function fmtOff(o){return (o>=0?"+":"−")+Math.abs(o).toFixed(1)+"s";}
 function confirmDelete(btn,ex){
   if(btn.dataset.armed){db.collection("melodies").doc(ex.id).delete().then(()=>{document.querySelector(".sheet")?.remove();}).catch(()=>{btn.textContent="Couldn’t remove it. Try again.";});return;}
   btn.dataset.armed="1";btn.textContent="Tap again to remove “"+ex.name+"”";
@@ -508,16 +534,27 @@ async function startExercise(ex){
   if(!breath)await Promise.race([loadPiano(),wait(4000)]);
   let rec=null;const chunks=[];
   if(S.record&&window.MediaRecorder){try{rec=new MediaRecorder(stream);rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};rec.start();}catch(e){rec=null;}}
-  const tl=buildTimeline(ex,preState?preState.tr:0,preState?preState.tempo:1);
+  const bk=(ex.kind==="melody"&&preState&&preState.backing&&preState.backing.use!==false)?preState.backing:null;
+  const tempo=preState?preState.tempo:1;
+  const tl=buildTimeline(bk?Object.assign({},ex,{_backing:true}):ex,preState?preState.tr:0,bk?1:tempo);
   const myBus=makeBus();
-  const spb=60/(tl.bpm||80);const lead=breath?3:4*spb;const t0=AC.currentTime+lead+.15;
-  if(!breath){for(let i=0;i<4;i++)click(AC.currentTime+.15+i*spb,i===0);tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,S.guide));}
+  const spb=60/(tl.bpm||80);const lead=breath?3:(bk?0:4*spb);const t0=AC.currentTime+lead+.15;
+  let song=null;
+  if(bk){ // the song is the clock: MIDI time = song time - offset
+    song=new Audio();song.src=URL.createObjectURL(bk.blob);song.preservesPitch=true;song.playbackRate=tempo;song.playsInline=true;
+    try{const g=AC.createGain();g.gain.value=S.trackVol??0.7;AC.createMediaElementSource(song).connect(g);g.connect(myBus);}catch(e){}
+    const first=Math.min(...tl.notes.map(n=>n.t));const startAt=Math.max(0,first+bk.off-4);
+    song.currentTime=startAt;
+    try{await song.play();}catch(e){stage.remove();showError("The song couldn’t play ("+(e.name||e.message)+"). Try Replace song with an .m4a or .mp3 file.");return;}
+    if(S.guide>0)tl.notes.forEach(n=>{const at=AC.currentTime+(n.t-(startAt-bk.off))/tempo;if(at>AC.currentTime)tone(n.m,at,n.dur/tempo,S.guide*.6);});
+  }else if(!breath){for(let i=0;i<4;i++)click(AC.currentTime+.15+i*spb,i===0);tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,S.guide));}
   const trail=[],frames=[];let smooth=[];
   run={ex,tl,t0,trail,frames,stage,cv,meter,count,prog,rec,chunks,breath,done:false,levels:[],hist:[]};
   const lo=breath?0:Math.min(...tl.notes.map(n=>n.m))-4,hi=breath?0:Math.max(...tl.notes.map(n=>n.m))+4;
   function stop(finish){
     if(run.done)return;run.done=true;cancelAnimationFrame(run.raf);
     try{myBus.gain.setValueAtTime(0,AC.currentTime);myBus.disconnect();}catch(e){}
+    if(song){try{song.pause();URL.revokeObjectURL(song.src);}catch(e){}}
     const fin=()=>{stage.remove();if(finish)showResults(run);};
     if(rec&&rec.state!=="inactive"){rec.onstop=()=>{run.blob=new Blob(chunks,{type:rec.mimeType||"audio/mp4"});fin();};rec.stop();}else fin();
   }
@@ -528,15 +565,15 @@ async function startExercise(ex){
     if(run.lastCT===nowCT){if(wall-run.frozenAt>600&&!run.reviving){run.reviving=true;AC.resume().catch(()=>{}).finally(()=>{run.reviving=false;});}
       if(wall-run.frozenAt>1500){meter.querySelector(".msg").textContent="Audio paused · tap the screen";meter.querySelector(".msg").style.color=css("--warn");}return;}
     run.lastCT=nowCT;run.frozenAt=wall;
-    const st=nowCT-t0;const st0=()=>st;
+    const st=song?(song.currentTime-bk.off):nowCT-t0;const st0=()=>st;
     analyser.getFloatTimeDomainData(buf);const p=yin(buf,AC.sampleRate);
     if(breath){breathFrame(run,st,p.rms);return;}
     let m=p.f>0?hz2m(p.f,S.a4):null;
     if(m!=null&&run.lastM!=null){const d=m-run.lastM;if(Math.abs(Math.abs(d)-12)<0.6)m-=Math.sign(d)*12;}
     if(m!=null){smooth.push(m);if(smooth.length>3)smooth.shift();const s=[...smooth].sort((a,b)=>a-b);m=s[s.length>>1];run.lastM=m;run.lastSeen=st0();}
     else{smooth=[];if(run.lastM!=null&&st0()-run.lastSeen<0.15)m=run.lastM;else run.lastM=null;}
-    const tS=st-0.03;
-    count.textContent=st<0?(Math.ceil(-st/spb)||""):"";
+    const tS=st-0.03*(song?tempo:1);
+    count.textContent=(!song&&st<0)?(Math.ceil(-st/spb)||""):"";
     const cur=tl.notes.find(n=>st>=n.t&&st<n.t+n.dur);
     // between notes, keep coaching against the note just sung (or the next one if it starts soon)
     let fb=cur;if(!fb&&st>=0){const i=tl.notes.findIndex(n=>n.t>st);const prevN=i<0?tl.notes[tl.notes.length-1]:tl.notes[i-1];const nextN=i<0?null:tl.notes[i];
@@ -545,7 +582,7 @@ async function startExercise(ex){
     updateMeter(meter,fb,m,st<0?tl.notes[0]:null);
     drawStage(run,st,lo,hi,fb,m);
     prog.firstChild.style.width=Math.max(0,Math.min(100,st/tl.total*100))+"%";
-    if(st>tl.total+.6)stop(true);
+    if(st>tl.total+.6||(song&&song.ended))stop(true);
   };
   run.frozenAt=performance.now();run.lastCT=-1;
   stage.addEventListener("pointerdown",e=>{if(e.target.closest("button"))return;if(AC&&AC.state!=="running")AC.resume().catch(()=>{});});
@@ -779,42 +816,71 @@ const stdev=a=>{const m=mean(a);return Math.sqrt(a.reduce((x,y)=>x+(y-m)**2,0)/a
 
 /* ---------- MIDI import (Standard MIDI File, monophonic melody) ---------- */
 async function importMidi(file){
-  if(!file)return;
-  try{
-    const bytes=new Uint8Array(await file.arrayBuffer());const mel=parseMidi(bytes);
-    mel.name=file.name.replace(/\.midi?$/i,"");mel.added=Date.now();mel.source="import";
-    if(db){await db.collection("melodies").add(mel);}else{MELS.unshift(Object.assign({id:"local"+Date.now()},mel));render();}
-  }catch(e){
-    const v=$("#view .wrap");v&&v.prepend(el("div",{class:"err"},"That file couldn’t be read as a melody ("+e.message+"). Export a MIDI of just the vocal line and try again."));
-  }
-  const fi=document.getElementById("midiFile");if(fi)fi.value="";
+  if(!file)return;const fi=document.getElementById("midiFile");if(fi)fi.value="";
+  let tracks;
+  try{tracks=parseMidiTracks(new Uint8Array(await file.arrayBuffer()));}
+  catch(e){const v=$("#view .wrap");v&&v.prepend(el("div",{class:"err"},"That file couldn’t be read as MIDI ("+e.message+")."));return;}
+  const name=file.name.replace(/\.midi?$/i,"").replace(/_+/g," ").trim();
+  const cands=tracks.tracks.filter(t=>t.notes.length&&t.ch!==9);
+  if(!cands.length){const v=$("#view .wrap");v&&v.prepend(el("div",{class:"err"},"No melody notes were found in that file."));return;}
+  const pick=async t=>{
+    const notes=t.mono.map(n=>({s:+n.s.toFixed(3),d:+n.d.toFixed(3),m:n.m}));
+    // attach karaoke syllables to the note that starts nearest each syllable
+    if(tracks.lyrics.length){for(const ly of tracks.lyrics){let best=null,bd=.2;for(const n of notes){const d=Math.abs(n.s-ly.t);if(d<bd){bd=d;best=n;}}if(best)best.l=((best.l||"")+ly.text).slice(0,14);}}
+    const mel={name,bpm:60,notes,added:Date.now(),source:"import",track:t.name||("Track "+(t.idx+1))};
+    await db.collection("melodies").add(mel);document.querySelector(".sheet")?.remove();tab="melodies";render();
+  };
+  if(cands.length===1){pick(cands[0]);return;}
+  const best=cands.slice().sort((a,b)=>b.score-a.score)[0];
+  const sh=el("div",{class:"sheet",role:"dialog","aria-label":"Choose the melody track"});const body=el("div",{class:"view"});const w=el("div",{class:"wrap"});body.append(w);
+  sh.append(el("div",{class:"bar"},el("span"),el("button",{class:"x","aria-label":"Close",onclick:()=>sh.remove()},"✕")),body);
+  w.append(el("div",{},el("h1",{style:"font-size:32px"},"Which track is the melody?"),el("p",{class:"sub"},name+" has "+cands.length+" instrument tracks. Pick the one you want to sing. The suggested one looks most like a vocal line.")));
+  const l=el("div",{class:"list"});
+  cands.sort((a,b)=>b.score-a.score).forEach(t=>{const lo=Math.min(...t.notes.map(n=>n.m)),hi=Math.max(...t.notes.map(n=>n.m));
+    l.append(el("button",{class:"item press",onclick:()=>pick(t)},el("span",{class:"n"+(t===best?" done":"")},t===best?"★":String(t.idx+1)),
+      el("div",{class:"grow"},el("div",{class:"t"},t.name||("Track "+(t.idx+1))),el("div",{class:"m"},t.notes.length+" notes · "+nn(lo)+"–"+nn(hi)+(t.poly>.25?" · plays chords":"")+(t===best?" · suggested":""))),el("span",{class:"chev"},"›")));});
+  w.append(l);document.body.append(sh);
 }
-function parseMidi(b){
+function parseMidiTracks(b){
   let p=0;const str=n=>{let s="";for(let i=0;i<n;i++)s+=String.fromCharCode(b[p++]);return s;};
   const u32=()=>(b[p++]<<24|b[p++]<<16|b[p++]<<8|b[p++])>>>0,u16=()=>b[p++]<<8|b[p++];
   const vlq=()=>{let v=0,c;do{c=b[p++];v=(v<<7)|(c&127);}while(c&128);return v;};
+  const txt=(a,b2)=>{let s="";for(let i=a;i<b2;i++)s+=String.fromCharCode(b[i]);try{return decodeURIComponent(escape(s));}catch(e){return s;}};
   if(str(4)!=="MThd")throw new Error("not a MIDI file");const hl=u32();u16();const nt=u16();const div=u16();p+=hl-6;
   if(div&0x8000)throw new Error("SMPTE timing not supported");
-  let tempo=500000;const tracks=[];
+  const tempos=[],raw=[];
   for(let t=0;t<nt&&p<b.length;t++){
-    if(str(4)!=="MTrk")throw new Error("bad track");const len=u32(),end=p+len;let tick=0,rs=0;const on={},notes=[];
-    while(p<end){tick+=vlq();let st=b[p];if(st&128){p++;rs=st;}else st=rs;
-      const hi=st&0xf0;
-      if(st===0xff){const ty=b[p++];const l=vlq();if(ty===0x51&&l===3){tempo=(b[p]<<16)|(b[p+1]<<8)|b[p+2];}p+=l;}
+    if(str(4)!=="MTrk")throw new Error("bad track");const len=u32(),end=p+len;let tick=0,rs=0;const on={},notes=[],lyr=[],txts=[];let name="",ch=-1;
+    while(p<end){tick+=vlq();let st=b[p];if(st&128){p++;rs=st;}else st=rs;const hi=st&0xf0;
+      if(st===0xff){const ty=b[p++];const l=vlq();
+        if(ty===0x51&&l===3)tempos.push({tick,us:(b[p]<<16)|(b[p+1]<<8)|b[p+2]});
+        else if(ty===0x03&&!name)name=txt(p,p+l).trim();
+        else if(ty===0x05)lyr.push({tick,text:txt(p,p+l)});
+        else if(ty===0x01)txts.push({tick,text:txt(p,p+l)});
+        p+=l;}
       else if(st===0xf0||st===0xf7){p+=vlq();}
-      else if(hi===0x90||hi===0x80){const k=b[p++],vel=b[p++];if(hi===0x90&&vel>0){on[k]=tick;}else if(on[k]!=null){notes.push({s:on[k],e:tick,m:k});delete on[k];}}
+      else if(hi===0x90||hi===0x80){const k=b[p++],vel=b[p++];if(ch<0)ch=st&15;const key=(st&15)*128+k;
+        if(hi===0x90&&vel>0){on[key]=tick;}else if(on[key]!=null){notes.push({s:on[key],e:tick,m:k});delete on[key];}}
       else if(hi===0xc0||hi===0xd0){p+=1;}else{p+=2;}}
-    p=end;if(notes.length)tracks.push(notes);}
-  if(!tracks.length)throw new Error("no notes found");
-  const ns=tracks.sort((a,b)=>b.length-a.length)[0].sort((a,b)=>a.s-b.s||b.m-a.m);
-  const mono=[];for(const n of ns){const last=mono[mono.length-1];if(last&&n.s<last.e){if(n.s===last.s)continue;last.e=n.s;}mono.push(Object.assign({},n));}
-  const bpm=60000000/tempo;
-  const out=mono.filter(n=>n.e>n.s).map(n=>({s:+(n.s/div).toFixed(3),d:+((n.e-n.s)/div).toFixed(3),m:n.m}));
-  const t0=Math.floor(out[0].s);out.forEach(n=>n.s=+(n.s-t0).toFixed(3));
-  return {bpm:+bpm.toFixed(2),notes:out};
+    p=end;raw.push({idx:t,name,ch,notes,lyr,txts});}
+  tempos.sort((a,c)=>a.tick-c.tick);if(!tempos.length||tempos[0].tick>0)tempos.unshift({tick:0,us:500000});
+  const segs=[];let sec=0;for(let i=0;i<tempos.length;i++){segs.push({tick:tempos[i].tick,sec,us:tempos[i].us});if(i+1<tempos.length)sec+=(tempos[i+1].tick-tempos[i].tick)/div*tempos[i].us/1e6;}
+  const t2s=tk=>{let g=segs[0];for(const x of segs){if(x.tick<=tk)g=x;else break;}return g.sec+(tk-g.tick)/div*g.us/1e6;};
+  // karaoke words: lyric events, or text events in a "Words"-style track (skip @ header tags)
+  let lyrics=[];const pickLy=arr=>arr.filter(x=>!x.text.startsWith("@")).map(x=>({t:t2s(x.tick),text:x.text.replace(/[\\/]/g," ").replace(/\s+/g," ")}));
+  const lyrTrack=raw.find(r=>r.lyr.length>8);const wordsTrack=raw.find(r=>r.txts.filter(x=>!x.text.startsWith("@")).length>8);
+  if(lyrTrack)lyrics=pickLy(lyrTrack.lyr);else if(wordsTrack)lyrics=pickLy(wordsTrack.txts);
+  const tracks=raw.filter(r=>r.notes.length).map(r=>{
+    const ns=r.notes.map(n=>({s:t2s(n.s),e:t2s(n.e),m:n.m})).filter(n=>n.e>n.s).sort((a,c)=>a.s-c.s||c.m-a.m);
+    let ov=0;for(let i=1;i<ns.length;i++)if(ns[i].s<ns[i-1].e-0.02)ov++;
+    const mono=[];for(const n of ns){const last=mono[mono.length-1];if(last&&n.s<last.s+last.d){if(Math.abs(n.s-last.s)<0.02)continue;last.d=n.s-last.s;}mono.push({s:n.s,d:n.e-n.s,m:n.m});}
+    const poly=ns.length?ov/ns.length:0;const lo=Math.min(...ns.map(n=>n.m)),hi=Math.max(...ns.map(n=>n.m));
+    let score=0;if(/melod|voz|vocal|voice|lead|canto|melody|cantante/i.test(r.name))score+=5;if(/doble|double|harmon|armon|coro/i.test(r.name))score-=2;
+    score+=Math.max(0,1-poly*3)*2;if(lo>=40&&hi<=84)score+=1;if(r.ch===9)score-=10;
+    return {idx:r.idx,name:r.name,ch:r.ch,notes:ns,mono,poly,score};});
+  return {tracks,lyrics};
 }
 
-document.addEventListener("visibilitychange",()=>{if(!document.hidden&&AC&&AC.state!=="running")AC.resume().catch(()=>{});});
 render();
 initCaps();
 </script>
