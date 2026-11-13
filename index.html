@@ -178,6 +178,7 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 
 <script>
 "use strict";
+const APP_VERSION="1.5 · grand piano";
 /* ---------- music helpers ---------- */
 const NAMES=["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
 const nn=m=>NAMES[((Math.round(m)%12)+12)%12]+(Math.floor(Math.round(m)/12)-1);
@@ -321,6 +322,12 @@ function render(){
     }
     if(SESS.length)w.append(el("button",{class:"btn ghost press",onclick:async e=>{const b=e.currentTarget;const txt=JSON.stringify({app:"Ensayo Vocal",exported:new Date().toISOString(),sessions:SESS.slice(0,200)});try{await navigator.clipboard.writeText(txt);b.textContent="Copied. Paste it into your chat with Claude";}catch(err){b.textContent="Couldn’t copy on this phone";}}},"Copy progress for Claude"));
     w.append(settingsBlock());
+    const pst=el("span",{},PIANO.ready?"Piano loaded":"Piano loads when you open an exercise");
+    w.append(el("div",{class:"panel",style:"display:flex;flex-direction:column;gap:12px"},
+      el("div",{class:"row between"},el("div",{},el("div",{style:"font-weight:700"},"Version "+APP_VERSION),el("div",{class:"note"},pst)),
+        el("button",{class:"btn ghost press",style:"padding:10px 14px;font-size:14px",onclick:async e=>{const b=e.currentTarget;b.textContent="Checking…";
+          try{await fetch(location.pathname+"?check="+Date.now(),{cache:"no-store"});await fetch("index.html?check="+Date.now(),{cache:"reload"});}catch(err){}
+          location.replace(location.pathname+"?v="+Date.now());}},"Check for updates"))));
   }
 }
 function sameDay(ts){return new Date(ts).toDateString()===new Date().toDateString();}
