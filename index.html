@@ -183,7 +183,7 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 
 <script>
 "use strict";
-const APP_VERSION="1.8 · loop, fade, seek, skip gaps";
+const APP_VERSION="1.9 · tap to pause";
 /* ---------- music helpers ---------- */
 const NAMES=["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
 const nn=m=>NAMES[((Math.round(m)%12)+12)%12]+(Math.floor(Math.round(m)/12)-1);
@@ -539,7 +539,7 @@ async function startExercise(ex,attempt=0){
   const toast=el("div",{class:"toast"});
   const loopB=breath?null:el("button",{class:"loopb","aria-label":"Loop a section"},"⟲ Loop: mark start");
   stage.append(cv,el("div",{class:"hud"},close,meter,stopB),count,prog,toast);
-  if(loopB)stage.append(loopB,el("div",{class:"hint"},"Double-tap left −10 s","Double-tap right +10 s"));
+  if(loopB)stage.append(loopB,el("div",{class:"hint"},"Tap to pause",el("br"),"Double-tap left −10 s",el("br"),"Double-tap right +10 s"));
   document.body.append(stage);
   if(!breath){const z=meter.querySelector(".zone");const q=S.tol/50*50;z.style.left=(50-q)+"%";z.style.width=(2*q)+"%";}
   try{await ensureAudio();}catch(e){stage.remove();showMicError(e);return;}
@@ -594,13 +594,23 @@ async function startExercise(ex,attempt=0){
     else{run.loop=null;loopB.textContent="⟲ Loop: mark start";loopB.classList.remove("on");say("Loop cleared");}
   });
   // double-tap left/right to jump 10 s; single tap wakes paused audio
-  let lastTap={t:0,side:""};
+  let lastTap={t:0,side:""},tapTimer=0;
+  const pauseCard=el("div",{class:"count",style:"flex-direction:column;gap:10px;font-size:64px"},el("span",{},"❚❚"),el("span",{style:"font-family:var(--f-body);font-size:15px;font-weight:800;color:var(--muted)"},"Paused · tap to continue"));
+  pauseCard.hidden=true;stage.append(pauseCard);
+  async function setPaused(on){
+    if(run.done||breath)return;run.paused=on;pauseCard.hidden=!on;
+    if(on){if(song)song.pause();try{await AC.suspend();}catch(e){}}
+    else{try{await AC.resume();}catch(e){}if(song){try{await song.play();}catch(e){}}run.frozenAt=performance.now();run.lastCT=-1;}
+  }
   stage.addEventListener("pointerdown",e=>{if(e.target.closest("button")||e.target.closest(".meter")||e.target.closest("input"))return;
-    if(AC&&AC.state!=="running")AC.resume().catch(()=>{});
-    if(breath)return;const side=e.clientX<window.innerWidth/2?"L":"R";const t=performance.now();
-    if(t-lastTap.t<320&&lastTap.side===side){lastTap={t:0,side:""};seek(now()+(side==="L"?-10:10),side==="L"?"⟲ −10 s":"+10 s ⟳");}else lastTap={t,side};});
+    if(breath){if(AC&&AC.state!=="running")AC.resume().catch(()=>{});return;}
+    if(run.paused){clearTimeout(tapTimer);lastTap={t:0,side:""};setPaused(false);return;}
+    const side=e.clientX<window.innerWidth/2?"L":"R";const t=performance.now();
+    if(t-lastTap.t<320&&lastTap.side===side){clearTimeout(tapTimer);lastTap={t:0,side:""};if(AC.state!=="running")AC.resume().catch(()=>{});seek(now()+(side==="L"?-10:10),side==="L"?"⟲ −10 s":"+10 s ⟳");}
+    else{lastTap={t,side};clearTimeout(tapTimer);tapTimer=setTimeout(()=>{lastTap={t:0,side:""};if(AC.state!=="running"&&!run.paused){AC.resume().catch(()=>{});return;}setPaused(true);},330);}});
   function stop(finish){
-    if(run.done)return;run.done=true;cancelAnimationFrame(run.raf);
+    if(run.done)return;run.done=true;cancelAnimationFrame(run.raf);clearTimeout(tapTimer);
+    if(run.paused){run.paused=false;AC.resume().catch(()=>{});}
     try{BUS.gain.setValueAtTime(0,AC.currentTime);BUS.disconnect();}catch(e){}
     if(song){try{song.pause();songGain&&songGain.disconnect();URL.revokeObjectURL(song.src);}catch(e){}}
     const fin=()=>{stage.remove();if(finish)showResults(run);};
@@ -609,6 +619,7 @@ async function startExercise(ex,attempt=0){
   run.stop=stop;
   const loop=()=>{
     if(run.done)return;run.raf=requestAnimationFrame(loop);
+    if(run.paused)return;
     const nowCT=AC.currentTime,wall=performance.now();
     if(run.lastCT===nowCT){if(wall-run.frozenAt>600&&!run.reviving){run.reviving=true;AC.resume().catch(()=>{}).finally(()=>{run.reviving=false;});}
       if(wall-run.frozenAt>1500){meter.querySelector(".msg").textContent="Audio paused · tap the screen";meter.querySelector(".msg").style.color=css("--warn");}return;}
