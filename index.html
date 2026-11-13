@@ -398,14 +398,26 @@ function autoShift(ex){
 
 /* ---------- audio ---------- */
 let AC=null,stream=null,analyser=null,buf=null,BUS=null;
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+function setSession(type){try{if(navigator.audioSession&&navigator.audioSession.type!==type)navigator.audioSession.type=type;}catch(e){}}
+function newCtx(){return new (window.AudioContext||window.webkitAudioContext)({latencyHint:"interactive"});}
+async function wake(){ // resume, or rebuild if iOS left the context suspended/interrupted
+  if(!AC||AC.state==="closed"){AC=newCtx();analyser=null;}
+  if(AC.state!=="running"){try{await Promise.race([AC.resume(),wait(700)]);}catch(e){}}
+  if(AC.state!=="running"){try{AC.close();}catch(e){}AC=newCtx();analyser=null;try{await Promise.race([AC.resume(),wait(700)]);}catch(e){}}
+}
 async function ensureAudio(){
-  if(!AC){AC=new (window.AudioContext||window.webkitAudioContext)({latencyHint:"interactive"});}
-  if(AC.state!=="running")await AC.resume();
-  if(!stream){
+  setSession("play-and-record");
+  const resumeP=wake(); // started inside the tap so iOS allows it
+  const live=stream&&stream.getAudioTracks().some(t=>t.readyState==="live"&&t.enabled);
+  if(!live){
     if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){const e=new Error("This view has no microphone access");e.name="NotAllowedError";throw e;}
     stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
-    const src=AC.createMediaStreamSource(stream);analyser=AC.createAnalyser();analyser.fftSize=2048;src.connect(analyser);buf=new Float32Array(analyser.fftSize);
+    analyser=null;
   }
+  await resumeP;
+  if(AC.state!=="running")await wake();
+  if(!analyser){const src=AC.createMediaStreamSource(stream);analyser=AC.createAnalyser();analyser.fftSize=2048;src.connect(analyser);buf=new Float32Array(analyser.fftSize);}
 }
 function tone(m,t,dur,vol,type="triangle"){
   if(vol<=0)return;const o=AC.createOscillator(),g=AC.createGain(),f=AC.createBiquadFilter();
@@ -415,7 +427,8 @@ function tone(m,t,dur,vol,type="triangle"){
 }
 function click(t,acc){const o=AC.createOscillator(),g=AC.createGain();o.frequency.value=acc?1500:1000;g.gain.setValueAtTime(.25,t);g.gain.exponentialRampToValueAtTime(.001,t+.06);o.connect(g);g.connect(BUS||AC.destination);o.start(t);o.stop(t+.07);}
 async function previewPlay(ex){
-  try{if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();await AC.resume();}catch(e){return;}
+  if(!stream)setSession("playback");
+  try{await wake();}catch(e){return;}
   if(BUS){try{BUS.disconnect();}catch(e){}}BUS=AC.createGain();BUS.connect(AC.destination);
   const tl=buildTimeline(ex,preState.tr,preState.tempo);const t0=AC.currentTime+.1;
   tl.notes.forEach(n=>tone(n.m,t0+n.t,n.dur,Math.max(.4,S.guide)));
@@ -467,7 +480,11 @@ async function startExercise(ex){
   run.stop=stop;
   const loop=()=>{
     if(run.done)return;run.raf=requestAnimationFrame(loop);
-    const st=AC.currentTime-t0;
+    const nowCT=AC.currentTime,wall=performance.now();
+    if(run.lastCT===nowCT){if(wall-run.frozenAt>600&&!run.reviving){run.reviving=true;AC.resume().catch(()=>{}).finally(()=>{run.reviving=false;});}
+      if(wall-run.frozenAt>1500){meter.querySelector(".msg").textContent="Audio paused · tap the screen";meter.querySelector(".msg").style.color=css("--warn");}return;}
+    run.lastCT=nowCT;run.frozenAt=wall;
+    const st=nowCT-t0;
     analyser.getFloatTimeDomainData(buf);const p=yin(buf,AC.sampleRate);
     if(breath){breathFrame(run,st,p.rms);return;}
     let m=p.f>0?hz2m(p.f,S.a4):null;
@@ -481,6 +498,8 @@ async function startExercise(ex){
     prog.firstChild.style.width=Math.max(0,Math.min(100,st/tl.total*100))+"%";
     if(st>tl.total+.6)stop(true);
   };
+  run.frozenAt=performance.now();run.lastCT=-1;
+  stage.addEventListener("pointerdown",e=>{if(e.target.closest("button"))return;if(AC&&AC.state!=="running")AC.resume().catch(()=>{});});
   run.raf=requestAnimationFrame(loop);
 }
 function centsOff(m,target){let c=(m-target)*100;if(S.octaveFree){c=((c%1200)+1800)%1200-600;}return c;}
@@ -662,6 +681,7 @@ function parseMidi(b){
   return {bpm:+bpm.toFixed(2),notes:out};
 }
 
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&AC&&AC.state!=="running")AC.resume().catch(()=>{});});
 render();
 initCaps();
 </script>
