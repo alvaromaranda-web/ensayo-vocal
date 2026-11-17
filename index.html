@@ -183,7 +183,7 @@ select{font:inherit;font-weight:700;padding:8px 10px;border-radius:12px;border:1
 
 <script>
 "use strict";
-const APP_VERSION="1.9 · tap to pause";
+const APP_VERSION="1.10 · single-track MIDI files";
 /* ---------- music helpers ---------- */
 const NAMES=["C","C♯","D","E♭","E","F","F♯","G","A♭","A","B♭","B"];
 const nn=m=>NAMES[((Math.round(m)%12)+12)%12]+(Math.floor(Math.round(m)/12)-1);
@@ -889,10 +889,11 @@ async function importMidi(file){
   const cands=tracks.tracks.filter(t=>t.notes.length&&t.ch!==9);
   if(!cands.length){const v=$("#view .wrap");v&&v.prepend(el("div",{class:"err"},"No melody notes were found in that file."));return;}
   const pick=async t=>{
-    const notes=t.mono.map(n=>({s:+n.s.toFixed(3),d:+n.d.toFixed(3),m:n.m}));
+    const med=[...t.mono.map(n=>n.m)].sort((a,c)=>a-c)[t.mono.length>>1];const oct=med>67?-12:0;
+    const notes=t.mono.map(n=>({s:+n.s.toFixed(3),d:+n.d.toFixed(3),m:n.m+oct}));
     // attach karaoke syllables to the note that starts nearest each syllable
     if(tracks.lyrics.length){for(const ly of tracks.lyrics){let best=null,bd=.2;for(const n of notes){const d=Math.abs(n.s-ly.t);if(d<bd){bd=d;best=n;}}if(best)best.l=((best.l||"")+ly.text).slice(0,14);}}
-    const mel={name,bpm:60,notes,added:Date.now(),source:"import",track:t.name||("Track "+(t.idx+1))};
+    const mel={name,bpm:60,notes,added:Date.now(),source:"import",track:t.name||("Track "+(t.idx+1)),octaveDown:oct<0};
     await db.collection("melodies").add(mel);document.querySelector(".sheet")?.remove();tab="melodies";render();
   };
   if(cands.length===1){pick(cands[0]);return;}
@@ -903,7 +904,7 @@ async function importMidi(file){
   const l=el("div",{class:"list"});
   cands.sort((a,b)=>b.score-a.score).forEach(t=>{const lo=Math.min(...t.notes.map(n=>n.m)),hi=Math.max(...t.notes.map(n=>n.m));
     l.append(el("button",{class:"item press",onclick:()=>pick(t)},el("span",{class:"n"+(t===best?" done":"")},t===best?"★":String(t.idx+1)),
-      el("div",{class:"grow"},el("div",{class:"t"},t.name||("Track "+(t.idx+1))),el("div",{class:"m"},t.notes.length+" notes · "+nn(lo)+"–"+nn(hi)+(t.poly>.25?" · plays chords":"")+(t===best?" · suggested":""))),el("span",{class:"chev"},"›")));});
+      el("div",{class:"grow"},el("div",{class:"t"},t.name||("Track "+(t.idx+1))),el("div",{class:"m"},t.notes.length+" notes · "+nn(lo)+"–"+nn(hi)+(t.poly>.25?" · plays chords":"")+(t.ch===9?" · drums":"")+(t===best?" · suggested":""))),el("span",{class:"chev"},"›")));});
   w.append(l);document.body.append(sh);
 }
 function parseMidiTracks(b){
@@ -913,7 +914,7 @@ function parseMidiTracks(b){
   const txt=(a,b2)=>{let s="";for(let i=a;i<b2;i++)s+=String.fromCharCode(b[i]);try{return decodeURIComponent(escape(s));}catch(e){return s;}};
   if(str(4)!=="MThd")throw new Error("not a MIDI file");const hl=u32();u16();const nt=u16();const div=u16();p+=hl-6;
   if(div&0x8000)throw new Error("SMPTE timing not supported");
-  const tempos=[],raw=[];
+  const tempos=[],raw=[],progs={};
   for(let t=0;t<nt&&p<b.length;t++){
     if(str(4)!=="MTrk")throw new Error("bad track");const len=u32(),end=p+len;let tick=0,rs=0;const on={},notes=[],lyr=[],txts=[];let name="",ch=-1;
     while(p<end){tick+=vlq();let st=b[p];if(st&128){p++;rs=st;}else st=rs;const hi=st&0xf0;
@@ -925,8 +926,9 @@ function parseMidiTracks(b){
         p+=l;}
       else if(st===0xf0||st===0xf7){p+=vlq();}
       else if(hi===0x90||hi===0x80){const k=b[p++],vel=b[p++];if(ch<0)ch=st&15;const key=(st&15)*128+k;
-        if(hi===0x90&&vel>0){on[key]=tick;}else if(on[key]!=null){notes.push({s:on[key],e:tick,m:k});delete on[key];}}
-      else if(hi===0xc0||hi===0xd0){p+=1;}else{p+=2;}}
+        if(hi===0x90&&vel>0){on[key]=tick;}else if(on[key]!=null){notes.push({s:on[key],e:tick,m:k,c:st&15});delete on[key];}}
+      else if(hi===0xc0){const pr=b[p++];if(!((st&15) in progs))progs[st&15]=pr;}
+      else if(hi===0xd0){p+=1;}else{p+=2;}}
     p=end;raw.push({idx:t,name,ch,notes,lyr,txts});}
   tempos.sort((a,c)=>a.tick-c.tick);if(!tempos.length||tempos[0].tick>0)tempos.unshift({tick:0,us:500000});
   const segs=[];let sec=0;for(let i=0;i<tempos.length;i++){segs.push({tick:tempos[i].tick,sec,us:tempos[i].us});if(i+1<tempos.length)sec+=(tempos[i+1].tick-tempos[i].tick)/div*tempos[i].us/1e6;}
@@ -935,14 +937,27 @@ function parseMidiTracks(b){
   let lyrics=[];const pickLy=arr=>arr.filter(x=>!x.text.startsWith("@")).map(x=>({t:t2s(x.tick),text:x.text.replace(/[\\/]/g," ").replace(/\s+/g," ")}));
   const lyrTrack=raw.find(r=>r.lyr.length>8);const wordsTrack=raw.find(r=>r.txts.filter(x=>!x.text.startsWith("@")).length>8);
   if(lyrTrack)lyrics=pickLy(lyrTrack.lyr);else if(wordsTrack)lyrics=pickLy(wordsTrack.txts);
-  const tracks=raw.filter(r=>r.notes.length).map(r=>{
+  const FAM=["Piano","Chromatic percussion","Organ","Guitar","Bass","Strings","Ensemble","Brass","Reed","Flute","Synth lead","Synth pad","Synth effects","Ethnic","Percussive","Sound effects"];
+  const parts=[];
+  for(const r of raw){const chans=[...new Set(r.notes.map(n=>n.c))].sort((a,c)=>a-c);
+    for(const c of chans){const inst=c===9?"Drums":(progs[c]!=null?FAM[progs[c]>>3]:"");
+      const label=chans.length>1||!r.name?("Instrument "+(c+1)+(inst?" · "+inst:"")+(r.name&&chans.length>1?" ("+r.name+")":"")):r.name+(inst?" · "+inst:"");
+      parts.push({idx:parts.length,name:label,ch:c,notes:r.notes.filter(n=>n.c===c),rawName:r.name});}}
+  const lyrT=lyrics.map(l=>l.t);
+  const tracks=parts.map(r=>{
     const ns=r.notes.map(n=>({s:t2s(n.s),e:t2s(n.e),m:n.m})).filter(n=>n.e>n.s).sort((a,c)=>a.s-c.s||c.m-a.m);
     let ov=0;for(let i=1;i<ns.length;i++)if(ns[i].s<ns[i-1].e-0.02)ov++;
     const mono=[];for(const n of ns){const last=mono[mono.length-1];if(last&&n.s<last.s+last.d){if(Math.abs(n.s-last.s)<0.02)continue;last.d=n.s-last.s;}mono.push({s:n.s,d:n.e-n.s,m:n.m});}
     const poly=ns.length?ov/ns.length:0;const lo=Math.min(...ns.map(n=>n.m)),hi=Math.max(...ns.map(n=>n.m));
-    let score=0;if(/melod|voz|vocal|voice|lead|canto|melody|cantante/i.test(r.name))score+=5;if(/doble|double|harmon|armon|coro/i.test(r.name))score-=2;
+    let score=0;if(/melod|voz|vocal|voice|lead|canto|melody|cantante/i.test(r.rawName||""))score+=5;
+    if(/\b(1|2)$/.test(r.rawName||"")&&/melod/i.test(r.rawName||""))score-=1;
+    if(lyrT.length&&r.ch!==9){ // karaoke files: the sung line starts a note on (almost) every syllable, and few notes have none
+      const near=(arr,t)=>{let lo2=0,hi2=arr.length-1;while(lo2<hi2){const mid=(lo2+hi2)>>1;if(arr[mid]<t)lo2=mid+1;else hi2=mid;}return Math.min(Math.abs(arr[lo2]-t),lo2>0?Math.abs(arr[lo2-1]-t):1e9);};
+      const on=ns.map(n=>n.s);const rec=lyrT.filter(t=>near(on,t)<0.08).length/lyrT.length;const prec=on.filter(t=>near(lyrT,t)<0.08).length/Math.max(1,on.length);
+      score+=8*(rec&&prec?2*rec*prec/(rec+prec):0);}
+    if(r.ch!==9){const sorted=ns.map(n=>n.m).sort((a,c)=>a-c);const med=sorted[sorted.length>>1];if(med<47)score-=3;}if(/doble|double|harmon|armon|coro/i.test(r.name))score-=2;
     score+=Math.max(0,1-poly*3)*2;if(lo>=40&&hi<=84)score+=1;if(r.ch===9)score-=10;
-    return {idx:r.idx,name:r.name,ch:r.ch,notes:ns,mono,poly,score};});
+    return {idx:r.idx,name:r.name,ch:r.ch,notes:ns,mono,poly,score};}).filter(t=>t.notes.length);
   return {tracks,lyrics};
 }
 
